@@ -1,26 +1,13 @@
 Source: libndp
 Priority: optional
-Maintainer: Andrew Ayer <agwa@andrewayer.name>
-Build-Depends: debhelper (>= 9)
-Standards-Version: 3.9.8
+Maintainer: Florian Ernst <florian@debian.org>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0.1
 Section: net
 Homepage: http://libndp.org
-Vcs-Git: https://anonscm.debian.org/git/collab-maint/libndp.git
-Vcs-Browser: https://anonscm.debian.org/gitweb/?p=collab-maint/libndp.git
-
-Package: libndp-dbg
-Section: debug
-Priority: extra
-Architecture: linux-any kfreebsd-any
-Multi-Arch: same
-Depends: libndp0 (= ${binary:Version}), ${misc:Depends}
-Description: Library for Neighbor Discovery Protocol (debug symbols)
- libndp is a library for the IPv6 Neighbor Discovery Protocol (NDP).  It
- contains functions for building and parsing NDP messages, and provides
- a high-level interface for sending and receiving NDP messages on a
- network interface.
- .
- This package provides debug symbols.
+Vcs-Git: https://salsa.debian.org/debian/libndp.git
+Vcs-Browser: https://salsa.debian.org/debian/libndp
+Rules-Requires-Root: no
 
 Package: libndp-dev
 Section: libdevel

@@ -25,16 +25,20 @@
 #include <errno.h>
 #include <ctype.h>
 #include <sys/socket.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <netinet/icmp6.h>
 #include <arpa/inet.h>
 #include <net/ethernet.h>
 #include <assert.h>
 #include <ndp.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 
 #include "ndp_private.h"
 #include "list.h"
+
+#define pr_err(args...) fprintf(stderr, ##args)
 
 /**
  * SECTION: logging
@@ -217,11 +221,9 @@ resend:
 	return 0;
 }
 
-static const char *str_in6_addr(struct in6_addr *addr)
+static const char *str_in6_addr(struct in6_addr *addr, char buf[static INET6_ADDRSTRLEN])
 {
-	static char buf[INET6_ADDRSTRLEN];
-
-	return inet_ntop(AF_INET6, addr, buf, sizeof(buf));
+	return inet_ntop(AF_INET6, addr, buf, INET6_ADDRSTRLEN);
 }
 
 
@@ -229,59 +231,6 @@ static const char *str_in6_addr(struct in6_addr *addr)
  * SECTION: NDP implementation
  * @short_description: functions that actually implements NDP
  */
-
-static int ndp_sock_open(struct ndp *ndp)
-{
-	int sock;
-	//struct icmp6_filter flt;
-	int ret;
-	int err;
-	int val;
-
-	sock = socket(PF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
-	if (sock == -1) {
-		err(ndp, "Failed to create ICMP6 socket.");
-		return -errno;
-	}
-
-	val = 1;
-	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO,
-			 &val, sizeof(val));
-	if (ret == -1) {
-		err(ndp, "Failed to setsockopt IPV6_RECVPKTINFO.");
-		err = -errno;
-		goto close_sock;
-	}
-
-	val = 255;
-	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
-			 &val, sizeof(val));
-	if (ret == -1) {
-		err(ndp, "Failed to setsockopt IPV6_MULTICAST_HOPS.");
-		err = -errno;
-		goto close_sock;
-	}
-
-	val = 1;
-	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVHOPLIMIT,
-			 &val, sizeof(val));
-	if (ret == -1) {
-		err(ndp, "Failed to setsockopt IPV6_RECVHOPLIMIT,.");
-		err = -errno;
-		goto close_sock;
-	}
-
-	ndp->sock = sock;
-	return 0;
-close_sock:
-	close(sock);
-	return err;
-}
-
-static void ndp_sock_close(struct ndp *ndp)
-{
-	close(ndp->sock);
-}
 
 struct ndp_msggeneric {
 	void *dataptr; /* must be first */
@@ -336,6 +285,7 @@ struct ndp_msg_type_info {
 	bool (*addrto_validate)(struct in6_addr *addr);
 };
 
+
 static void ndp_msg_addrto_adjust_all_nodes(struct in6_addr *addr)
 {
 	struct in6_addr any = IN6ADDR_ANY_INIT;
@@ -358,6 +308,18 @@ static void ndp_msg_addrto_adjust_all_routers(struct in6_addr *addr)
 	addr->s6_addr32[1] = 0;
 	addr->s6_addr32[2] = 0;
 	addr->s6_addr32[3] = htonl(0x2);
+}
+
+/*
+ * compute link-local solicited-node multicast address
+ */
+static void ndp_msg_addrto_adjust_solicit_multi(struct in6_addr *addr,
+						struct in6_addr *target)
+{
+	addr->s6_addr32[0] = htonl(0xFF020000);
+	addr->s6_addr32[1] = 0;
+	addr->s6_addr32[2] = htonl(0x1);
+	addr->s6_addr32[3] = htonl(0xFF000000) | target->s6_addr32[3];
 }
 
 static bool ndp_msg_addrto_validate_link_local(struct in6_addr *addr)
@@ -729,6 +691,137 @@ NDP_EXPORT
 void ndp_msg_ifindex_set(struct ndp_msg *msg, uint32_t ifindex)
 {
 	msg->ifindex = ifindex;
+}
+
+/**
+ * ndp_msg_dest_set:
+ * @msg: message structure
+ * @dest: ns,na dest
+ *
+ * Set dest address in IPv6 header for NS and NA.
+ **/
+NDP_EXPORT
+void ndp_msg_dest_set(struct ndp_msg *msg, struct in6_addr *dest)
+{
+	enum ndp_msg_type msg_type = ndp_msg_type(msg);
+	switch (msg_type) {
+		case NDP_MSG_NS:
+			/* fall through */
+		case NDP_MSG_NA:
+			msg->addrto = *dest;
+			/* fall through */
+		default:
+			break;
+	}
+}
+
+/**
+ * ndp_msg_target_set:
+ * @msg: message structure
+ * @target: ns,na target
+ *
+ * Set target address in ICMPv6 header for NS and NA.
+ **/
+NDP_EXPORT
+void ndp_msg_target_set(struct ndp_msg *msg, struct in6_addr *target)
+{
+	struct in6_addr any = IN6ADDR_ANY_INIT;
+	enum ndp_msg_type msg_type = ndp_msg_type(msg);
+
+	switch (msg_type) {
+		case NDP_MSG_NS:
+			((struct ndp_msgns*)&msg->nd_msg)->ns->nd_ns_target = *target;
+			/*
+			 * Neighbor Solicitations are multicast when the node
+			 * needs to resolve an address and unicast when the
+			 * node seeks to verify the reachability of a
+			 * neighbor.
+			 *
+			 * In this case we need to update the dest address in
+			 * IPv6 header when
+			 * a) IPv6 dest address is not set
+			 * b) ICMPv6 target address is supplied
+			 * */
+			if (!memcmp(&msg->addrto, &any, sizeof(any)) &&
+			    memcmp(target, &any, sizeof(any)))
+				ndp_msg_addrto_adjust_solicit_multi(&msg->addrto, target);
+			break;
+		case NDP_MSG_NA:
+			((struct ndp_msgna*)&msg->nd_msg)->na->nd_na_target = *target;
+			break;
+		default:
+			break;
+	}
+}
+
+static int ndp_get_iface_mac(int ifindex, char *ptr)
+{
+	int sockfd, err = 0;
+	struct ifreq ifr;
+
+	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sockfd == -1) {
+		pr_err("%s: Failed to create socket", __func__);
+		return -errno;
+	}
+
+	if (if_indextoname(ifindex, (char *)&ifr.ifr_name) == NULL) {
+		pr_err("%s: Failed to get iface name with index %d", __func__, ifindex);
+		err = -errno;
+		goto close_sock;
+	}
+
+	if (ioctl(sockfd, SIOCGIFHWADDR, &ifr) < 0) {
+		pr_err("%s: Failed to get iface mac with index %d\n", __func__, ifindex);
+		err = -errno;
+		goto close_sock;
+	}
+
+	memcpy(ptr, &ifr.ifr_hwaddr.sa_data, sizeof(ifr.ifr_hwaddr.sa_data));
+
+close_sock:
+	close(sockfd);
+	return err;
+}
+
+static void ndp_msg_opt_set_linkaddr(struct ndp_msg *msg, int ndp_opt)
+{
+	char *opts_start = ndp_msg_payload_opts(msg);
+	struct nd_opt_hdr *s_laddr_opt = (struct nd_opt_hdr *) opts_start;
+	char *opt_data = (char *) s_laddr_opt + sizeof(struct nd_opt_hdr);
+	int err;
+
+	err = ndp_get_iface_mac(ndp_msg_ifindex(msg), opt_data);
+	if (err)
+		return;
+
+	opt_data += 6;
+	s_laddr_opt->nd_opt_type = ndp_opt;
+	s_laddr_opt->nd_opt_len = (opt_data - opts_start) >> 3;
+	msg->len += opt_data - opts_start;
+}
+
+/**
+ * ndp_msg_opt_set:
+ * @msg: message structure
+ *
+ * Set neighbor discovery option info.
+ **/
+NDP_EXPORT
+void ndp_msg_opt_set(struct ndp_msg *msg)
+{
+	enum ndp_msg_type msg_type = ndp_msg_type(msg);
+
+	switch (msg_type) {
+		case NDP_MSG_NS:
+			ndp_msg_opt_set_linkaddr(msg, ND_OPT_SOURCE_LINKADDR);
+			break;
+		case NDP_MSG_NA:
+			ndp_msg_opt_set_linkaddr(msg, ND_OPT_TARGET_LINKADDR);
+			break;
+		default:
+			break;
+	}
 }
 
 /**
@@ -1520,7 +1613,7 @@ uint32_t ndp_msg_opt_mtu(struct ndp_msg *msg, int offset)
 NDP_EXPORT
 struct in6_addr *ndp_msg_opt_route_prefix(struct ndp_msg *msg, int offset)
 {
-	static struct in6_addr prefix;
+	static NDP_THREAD struct in6_addr prefix;
 	struct __nd_opt_route_info *ri =
 			ndp_msg_payload_opts_offset(msg, offset);
 
@@ -1626,7 +1719,7 @@ NDP_EXPORT
 struct in6_addr *ndp_msg_opt_rdnss_addr(struct ndp_msg *msg, int offset,
 					int addr_index)
 {
-	static struct in6_addr addr;
+	static NDP_THREAD struct in6_addr addr;
 	struct __nd_opt_rdnss *rdnss =
 			ndp_msg_payload_opts_offset(msg, offset);
 	size_t len = rdnss->nd_opt_rdnss_len << 3; /* convert to bytes */
@@ -1676,7 +1769,7 @@ char *ndp_msg_opt_dnssl_domain(struct ndp_msg *msg, int offset,
 			       int domain_index)
 {
 	int i;
-	static char buf[256];
+	static NDP_THREAD char buf[256];
 	struct __nd_opt_dnssl *dnssl =
 			ndp_msg_payload_opts_offset(msg, offset);
 	size_t len = dnssl->nd_opt_dnssl_len << 3; /* convert to bytes */
@@ -1725,6 +1818,7 @@ static int ndp_sock_recv(struct ndp *ndp)
 	enum ndp_msg_type msg_type;
 	size_t len;
 	int err;
+	char buf[INET6_ADDRSTRLEN];
 
 	msg = ndp_msg_alloc();
 	if (!msg)
@@ -1738,7 +1832,7 @@ static int ndp_sock_recv(struct ndp *ndp)
 		goto free_msg;
 	}
 	dbg(ndp, "rcvd from: %s, ifindex: %u, hoplimit: %d",
-		 str_in6_addr(&msg->addrto), msg->ifindex, msg->hoplimit);
+		 str_in6_addr(&msg->addrto, buf), msg->ifindex, msg->hoplimit);
 
 	if (msg->hoplimit != 255) {
 		warn(ndp, "ignoring packet with bad hop limit (%d)", msg->hoplimit);
@@ -1778,6 +1872,77 @@ static int ndp_sock_recv(struct ndp *ndp)
 free_msg:
 	ndp_msg_destroy(msg);
 	return err;
+}
+
+
+/**
+ * SECTION: socket open/close functions
+ * @short_description: functions for opening and closing the ICMPv6 raw socket
+ */
+
+static int ndp_sock_open(struct ndp *ndp)
+{
+	int sock;
+	struct icmp6_filter flt;
+	int ret;
+	int err;
+	int val;
+	int i;
+
+	sock = socket(PF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+	if (sock == -1) {
+		err(ndp, "Failed to create ICMP6 socket.");
+		return -errno;
+	}
+
+	val = 1;
+	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO,
+			 &val, sizeof(val));
+	if (ret == -1) {
+		err(ndp, "Failed to setsockopt IPV6_RECVPKTINFO.");
+		err = -errno;
+		goto close_sock;
+	}
+
+	val = 255;
+	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+			 &val, sizeof(val));
+	if (ret == -1) {
+		err(ndp, "Failed to setsockopt IPV6_MULTICAST_HOPS.");
+		err = -errno;
+		goto close_sock;
+	}
+
+	val = 1;
+	ret = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVHOPLIMIT,
+			 &val, sizeof(val));
+	if (ret == -1) {
+		err(ndp, "Failed to setsockopt IPV6_RECVHOPLIMIT,.");
+		err = -errno;
+		goto close_sock;
+	}
+
+	ICMP6_FILTER_SETBLOCKALL(&flt);
+	for (i = 0; i < NDP_MSG_TYPE_LIST_SIZE; i++)
+		ICMP6_FILTER_SETPASS(ndp_msg_type_info(i)->raw_type, &flt);
+	ret = setsockopt(sock, IPPROTO_ICMPV6, ICMP6_FILTER, &flt,
+			 sizeof(flt));
+	if (ret == -1) {
+		err(ndp, "Failed to setsockopt ICMP6_FILTER.");
+		err = -errno;
+		goto close_sock;
+	}
+
+	ndp->sock = sock;
+	return 0;
+close_sock:
+	close(sock);
+	return err;
+}
+
+static void ndp_sock_close(struct ndp *ndp)
+{
+	close(ndp->sock);
 }
 
 
@@ -1942,22 +2107,20 @@ int ndp_call_eventfd_handler(struct ndp *ndp)
 NDP_EXPORT
 int ndp_callall_eventfd_handler(struct ndp *ndp)
 {
-	fd_set rfds;
-	int fdmax;
-	struct timeval tv;
-	int fd = ndp_get_eventfd(ndp);
+	struct pollfd pfd;
 	int ret;
 	int err;
 
-	memset(&tv, 0, sizeof(tv));
-	FD_ZERO(&rfds);
-	FD_SET(fd, &rfds);
-	fdmax = fd + 1;
+	pfd = (struct pollfd) {
+		.fd = ndp_get_eventfd(ndp),
+		.events = POLLIN,
+	};
+
 	while (true) {
-		ret = select(fdmax, &rfds, NULL, NULL, &tv);
+		ret = poll(&pfd, 1, 0);
 		if (ret == -1)
 			return -errno;
-		if (!FD_ISSET(fd, &rfds))
+		if (!(pfd.revents & POLLIN))
 			return 0;
 		err = ndp_call_eventfd_handler(ndp);
 		if (err)

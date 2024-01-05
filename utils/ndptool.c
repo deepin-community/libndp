@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ndp.h>
+#include <poll.h>
 
 enum verbosity_level {
 	VERB1,
@@ -58,13 +59,10 @@ static void empty_signal_handler(int signal)
 
 static int run_main_loop(struct ndp *ndp)
 {
-	fd_set rfds;
-	fd_set rfds_tmp;
-	int fdmax;
+	struct pollfd pfd;
 	int ret;
 	struct sigaction siginfo;
 	sigset_t mask;
-	int ndp_fd;
 	int err = 0;
 
 	sigemptyset(&siginfo.sa_mask);
@@ -99,23 +97,22 @@ static int run_main_loop(struct ndp *ndp)
 
 	sigemptyset(&mask);
 
-	FD_ZERO(&rfds);
-	ndp_fd = ndp_get_eventfd(ndp);
-	FD_SET(ndp_fd, &rfds);
-	fdmax = ndp_fd + 1;
+	pfd = (struct pollfd) {
+		.fd = ndp_get_eventfd(ndp),
+		.events = POLLIN,
+	};
 
 	for (;;) {
-		rfds_tmp = rfds;
-		ret = pselect(fdmax, &rfds_tmp, NULL, NULL, NULL, &mask);
+		ret = ppoll(&pfd, 1, NULL, &mask);
 		if (ret == -1) {
 			if (errno == EINTR) {
 				goto out;
 			}
-			pr_err("Select failed\n");
+			pr_err("Poll failed\n");
 			err = -errno;
 			goto out;
 		}
-		if (FD_ISSET(ndp_fd, &rfds_tmp)) {
+		if (pfd.revents & POLLIN) {
 			err = ndp_call_eventfd_handler(ndp);
 			if (err) {
 				pr_err("ndp eventfd handler call failed\n");
@@ -134,6 +131,8 @@ static void print_help(const char *argv0) {
             "\t-v --verbose             Increase output verbosity\n"
             "\t-t --msg-type=TYPE       Specify message type\n"
 	    "\t                         (\"rs\", \"ra\", \"ns\", \"na\")\n"
+            "\t-D --dest=DEST           Dest address in IPv6 header for NS or NA\n"
+            "\t-T --target=TARGET       Target address in ICMPv6 header for NS or NA\n"
             "\t-i --ifname=IFNAME       Specify interface name\n"
             "\t-U --unsolicited         Send Unsolicited NA\n"
 	    "Available commands:\n"
@@ -142,11 +141,9 @@ static void print_help(const char *argv0) {
             argv0);
 }
 
-static const char *str_in6_addr(struct in6_addr *addr)
+static const char *str_in6_addr(struct in6_addr *addr, char buf[static INET6_ADDRSTRLEN])
 {
-	static char buf[INET6_ADDRSTRLEN];
-
-	return inet_ntop(AF_INET6, addr, buf, sizeof(buf));
+	return inet_ntop(AF_INET6, addr, buf, INET6_ADDRSTRLEN);
 }
 
 static void pr_out_hwaddr(unsigned char *hwaddr, size_t len)
@@ -186,6 +183,7 @@ static void pr_out_lft(uint32_t lifetime)
 
 static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 {
+	char buf[INET6_ADDRSTRLEN];
 	char ifname[IF_NAMESIZE];
 	enum ndp_msg_type msg_type = ndp_msg_type(msg);
 	int offset;
@@ -193,7 +191,7 @@ static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 	if_indextoname(ndp_msg_ifindex(msg), ifname);
 	pr_out("NDP payload len %zu, from addr: %s, iface: %s\n",
 	       ndp_msg_payload_len(msg),
-	       str_in6_addr(ndp_msg_addrto(msg)), ifname);
+	       str_in6_addr(ndp_msg_addrto(msg), buf), ifname);
 	if (msg_type == NDP_MSG_RS) {
 		pr_out("  Type: RS\n");
 	} else if (msg_type == NDP_MSG_RA) {
@@ -242,7 +240,7 @@ static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 			valid_time = ndp_msg_opt_prefix_valid_time(msg, offset);
 			preferred_time = ndp_msg_opt_prefix_preferred_time(msg, offset);
 			pr_out("  Prefix: %s/%u",
-			       str_in6_addr(ndp_msg_opt_prefix(msg, offset)),
+			       str_in6_addr(ndp_msg_opt_prefix(msg, offset), buf),
 			       ndp_msg_opt_prefix_len(msg, offset));
 			pr_out(", valid_time: ");
 			if (valid_time == (uint32_t) -1)
@@ -266,7 +264,7 @@ static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 			pr_out("  MTU: %u\n", ndp_msg_opt_mtu(msg, offset));
 		ndp_msg_opt_for_each_offset(offset, msg, NDP_MSG_OPT_ROUTE) {
 			pr_out("  Route: %s/%u",
-			       str_in6_addr(ndp_msg_opt_route_prefix(msg, offset)),
+			       str_in6_addr(ndp_msg_opt_route_prefix(msg, offset), buf),
 			       ndp_msg_opt_route_prefix_len(msg, offset));
 			pr_out(", lifetime: ");
 			pr_out_lft(ndp_msg_opt_route_lifetime(msg, offset));
@@ -275,14 +273,14 @@ static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 			pr_out("\n");
 		}
 		ndp_msg_opt_for_each_offset(offset, msg, NDP_MSG_OPT_RDNSS) {
-			static struct in6_addr *addr;
+			struct in6_addr *addr;
 			int addr_index;
 
 			pr_out("  Recursive DNS Servers: ");
 			ndp_msg_opt_rdnss_for_each_addr(addr, addr_index, msg, offset) {
 				if (addr_index != 0)
 					pr_out(", ");
-				pr_out("%s", str_in6_addr(addr));
+				pr_out("%s", str_in6_addr(addr, buf));
 			}
 			pr_out(", lifetime: ");
 			pr_out_lft(ndp_msg_opt_rdnss_lifetime(msg, offset));
@@ -299,7 +297,7 @@ static int msgrcv_handler_func(struct ndp *ndp, struct ndp_msg *msg, void *priv)
 				pr_out("%s", domain);
 			}
 			pr_out(", lifetime: ");
-			pr_out_lft(ndp_msg_opt_rdnss_lifetime(msg, offset));
+			pr_out_lft(ndp_msg_opt_dnssl_lifetime(msg, offset));
 			pr_out("\n");
 		}
 	} else if (msg_type == NDP_MSG_NS) {
@@ -332,7 +330,8 @@ static int run_cmd_monitor(struct ndp *ndp, enum ndp_msg_type msg_type,
 }
 
 static int run_cmd_send(struct ndp *ndp, enum ndp_msg_type msg_type,
-			uint32_t ifindex)
+			uint32_t ifindex, struct in6_addr *dest,
+			struct in6_addr *target)
 {
 	struct ndp_msg *msg;
 	int err;
@@ -343,6 +342,9 @@ static int run_cmd_send(struct ndp *ndp, enum ndp_msg_type msg_type,
 		return err;
 	}
 	ndp_msg_ifindex_set(msg, ifindex);
+	ndp_msg_dest_set(msg, dest);
+	ndp_msg_target_set(msg, target);
+	ndp_msg_opt_set(msg);
 
 	err = ndp_msg_send_with_flags(ndp, msg, flags);
 	if (err) {
@@ -383,26 +385,34 @@ int main(int argc, char **argv)
 		{ "verbose",	no_argument,		NULL, 'v' },
 		{ "msg-type",	required_argument,	NULL, 't' },
 		{ "ifname",	required_argument,	NULL, 'i' },
+		{ "dest",	required_argument,	NULL, 'D' },
+		{ "target",	required_argument,	NULL, 'T' },
 		{ "unsolicited",no_argument,		NULL, 'U' },
 		{ NULL, 0, NULL, 0 }
 	};
-	int opt;
-	struct ndp *ndp;
-	char *msgtypestr = NULL;
-	enum ndp_msg_type msg_type;
-	char *ifname = NULL;
-	uint32_t ifindex;
-	char *cmd_name;
-	int err;
-	int res = EXIT_FAILURE;
 
-	while ((opt = getopt_long(argc, argv, "hvt:i:U",
+	struct in6_addr target = IN6ADDR_ANY_INIT;
+	struct in6_addr dest = IN6ADDR_ANY_INIT;
+	enum ndp_msg_type msg_type;
+	char *msgtypestr = NULL;
+	int res = EXIT_FAILURE;
+	char *ifname = NULL;
+	char *daddr = NULL;
+	char *taddr = NULL;
+	uint32_t ifindex;
+	struct ndp *ndp;
+	char *cmd_name;
+	int opt;
+	int err;
+
+	while ((opt = getopt_long(argc, argv, "hvt:D:T:i:U",
 				  long_options, NULL)) >= 0) {
 
 		switch(opt) {
 		case 'h':
 			print_help(argv0);
-			return EXIT_SUCCESS;
+			res = EXIT_SUCCESS;
+			goto errout;
 		case 'v':
 			g_verbosity++;
 			break;
@@ -414,17 +424,25 @@ int main(int argc, char **argv)
 			free(ifname);
 			ifname = strdup(optarg);
 			break;
+		case 'D':
+			free(daddr);
+			daddr = strdup(optarg);
+			break;
+		case 'T':
+			free(taddr);
+			taddr = strdup(optarg);
+			break;
 		case 'U':
 			flags |= ND_OPT_NA_UNSOL;
 			break;
 		case '?':
 			pr_err("unknown option.\n");
 			print_help(argv0);
-			return EXIT_FAILURE;
+			goto errout;
 		default:
 			pr_err("unknown option \"%c\".\n", opt);
 			print_help(argv0);
-			return EXIT_FAILURE;
+			goto errout;
 		}
 	}
 
@@ -445,6 +463,21 @@ int main(int argc, char **argv)
 			pr_err("Interface \"%s\" does not exist\n", ifname);
 			goto errout;
 		}
+	}
+
+	if (daddr && (flags & ND_OPT_NA_UNSOL)) {
+		pr_err("Conflicts for both setting dest address and unsolicited flag\n");
+		goto errout;
+	}
+
+	if (daddr && inet_pton(AF_INET6, daddr, &dest) <= 0) {
+		pr_err("Invalid dest address \"%s\"\n", daddr);
+		goto errout;
+	}
+
+	if (taddr && inet_pton(AF_INET6, taddr, &target) <= 0) {
+		pr_err("Invalid target address \"%s\"\n", taddr);
+		goto errout;
 	}
 
 	err = get_msg_type(&msg_type, msgtypestr);
@@ -477,7 +510,7 @@ int main(int argc, char **argv)
 			print_help(argv0);
 			goto errout;
 		}
-		err = run_cmd_send(ndp, msg_type, ifindex);
+		err = run_cmd_send(ndp, msg_type, ifindex, &dest, &target);
 	} else {
 		pr_err("Unknown command \"%s\"\n", cmd_name);
 		goto ndp_close;
@@ -493,5 +526,9 @@ int main(int argc, char **argv)
 ndp_close:
 	ndp_close(ndp);
 errout:
+	free(msgtypestr);
+	free(ifname);
+	free(daddr);
+	free(taddr);
 	return res;
 }

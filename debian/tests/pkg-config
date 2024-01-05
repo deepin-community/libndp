@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -e
+
+if [ -n "${DEB_HOST_GNU_TYPE:-}" ]; then
+    CROSS_COMPILE=${DEB_HOST_GNU_TYPE}-
+else
+    CROSS_COMPILE=
+fi
+
+WORKDIR="$(mktemp -d)"
+trap "rm -rf $WORKDIR" 0 INT QUIT ABRT PIPE TERM
+
+${CROSS_COMPILE}gcc -D_GNU_SOURCE -Wformat -Werror=format-security -Wall -o "$WORKDIR/ndptool" utils/ndptool.c $(pkg-config --cflags --libs libndp)
+echo "build: OK"
+[ -x "$WORKDIR/ndptool" ]
+# anything beyond --help needs extended permissions or it will yield "Failed to open ndp: Operation not permitted"
+"$WORKDIR/ndptool" --help
+echo "run: OK"

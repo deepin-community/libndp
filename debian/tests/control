@@ -1,0 +1,6 @@
+Tests: pkg-config
+Depends:
+ build-essential,
+ pkg-config,
+ libndp-dev
+Restrictions: superficial

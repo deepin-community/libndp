@@ -1,3 +1,46 @@
+libndp (1.8-1) unstable; urgency=medium
+
+  [ Michael Biebl ]
+  * Drop --disable-silent-rules from debian/rules. This is now handled by dh
+    directly depending on whether the DH_QUIET environment variable is set.
+
+  [ Ondřej Nový ]
+  * d/copyright: Use https protocol in Format field
+  * d/control: Deprecating priority extra as per policy 4.0.1
+  * d/control: Set Vcs-* to salsa.debian.org
+
+  [ Debian Janitor ]
+  * [07f0e48] Transition to automatic debug package (from: libndp-dbg).
+    Changes-By: lintian-brush
+    Fixes: lintian: debian-control-has-obsolete-dbg-package
+  * [0e8a255] Bump debhelper from deprecated 9 to 10.
+    Changes-By: lintian-brush
+    Fixes: lintian: package-uses-deprecated-debhelper-compat-version
+  * [3ef06fb] Set upstream metadata fields: Bug-Database, Bug-Submit,
+    Repository, Repository-Browse.
+    Changes-By: lintian-brush
+    Fixes: lintian: upstream-metadata-file-is-missing
+    Fixes: lintian: upstream-metadata-missing-bug-tracking
+    Fixes: lintian: upstream-metadata-missing-repository
+
+  [ Florian Ernst ]
+  * [2f15507] New upstream version 1.8 (Closes: #907174)
+  * [79a30ff] update symbols for upstream 1.8
+  * [fe2d83d] update copyright years
+  * [bd32202] migrate to debhelper-compat (= 13)
+  * [0d6755e] build with autoreconf
+  * [3f1f0e3] update watch file to latest recommendation
+  * [995c00c] set Rules-Requires-Root: no
+  * [4caabb7] add Build-Depends-Package to symbols
+  * [f502820] Standards-Version: 4.6.0.1 (no further changes required)
+  * [eba3877] add superficial pkg-config autopkgtest
+  * [5452683] add missing pkg-config autopkgtest Depends
+  * [7fc87e6] adopting the package with the previous maintainer's approval
+    cf. debbug#907174, many thanks to Andrew Ayer
+  * [e6543d9] create debian/salsa-ci.yml file
+
+ -- Florian Ernst <florian@debian.org>  Sun, 03 Apr 2022 08:16:41 +0200
+
 libndp (1.6-1) unstable; urgency=high
 
   * New upstream release. Fixes CVE-2016-3698. (Closes: #824545, #781755)
@@ -65,4 +108,3 @@ libndp (1.2-1) unstable; urgency=low
   * Initial release (Closes: #742973)
 
  -- Andrew Ayer <agwa@andrewayer.name>  Sat, 29 Mar 2014 10:40:30 -0700
-
