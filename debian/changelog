@@ -1,3 +1,9 @@
+libndp (1.8-1deepin1) unstable; urgency=medium
+
+  * merge upstream patch,fix CVE-2024-5564.
+
+ -- kongxinglong <kongxinglong@uniontech.com>  Thu, 29 Aug 2024 17:27:09 +0800
+
 libndp (1.8-1) unstable; urgency=medium
 
   [ Michael Biebl ]
