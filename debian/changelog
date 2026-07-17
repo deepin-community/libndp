@@ -1,8 +1,21 @@
-libndp (1.8-1deepin1) unstable; urgency=medium
+libndp (1.9-1) unstable; urgency=medium
 
-  * merge upstream patch,fix CVE-2024-5564.
+  * [54338e0] New upstream version 1.9
+  * [d7d237a] d/patches/: drop CVE-2024-5564.patch now included upstream
+  * [8edc183] d/symbols: update for new upstream release
 
- -- kongxinglong <kongxinglong@uniontech.com>  Thu, 29 Aug 2024 17:27:09 +0800
+ -- Florian Ernst <florian@debian.org>  Fri, 28 Jun 2024 17:41:51 +0200
+
+libndp (1.8-2) unstable; urgency=high
+
+  * [a6136d6] add debian/patches/CVE-2024-5564.patch from upstream fixing
+    CVE-2024-5564 (Closes: #1072366)
+  * [5119f5e] debian/rules: drop now-complete dh_strip --dbgsym-migration
+  * [4d590c2] debian/copyright: update debian/ copyright years
+  * [3d049d7] debian/control: Standards-Version 4.7.0 (no further changes
+    required)
+
+ -- Florian Ernst <florian@debian.org>  Mon, 10 Jun 2024 08:11:09 +0200
 
 libndp (1.8-1) unstable; urgency=medium
 
